@@ -1,0 +1,93 @@
+name: Java CI with Docker Build
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'build.gradle'
+      - 'dockerfile'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: 'gradle'
+
+    - name: Build Java Application
+      run: ./gradlew bootJar 
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io 
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Generate Dynamic Image Tag
+      id: meta
+      run: |
+        echo "TAG=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./dockerfile
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}/product-service:${{ steps.meta.outputs.TAG }}
+          ghcr.io/${{ github.repository }}/product-service:latest
+
+    # --- NEW: UPDATE GITOPS MANIFEST REPOSITORY ---
+    
+    - name: Checkout Manifest Repository
+      uses: actions/checkout@v4
+      with:
+        repository: 'ShanmugamSubramanyam/springboot-gitops-manifests'
+        token: ${{ secrets.MANIFEST_REPO_TOKEN }}
+        path: 'manifest-repo'
+
+    - name: Update Deployment Image Tag
+      run: |
+        cd manifest-repo
+        
+        # Target path inside your manifest repo: apps/springboot-service/deployment.yaml
+        TARGET_FILE="apps/springboot-service/deployment.yaml"
+        
+        # Verify the file exists before editing
+        if [ -f "$TARGET_FILE" ]; then
+          # Updates the image line matching product-service to use the new version tag
+          sed -i "s|image: ghcr.io/.*product-service:.*|image: ghcr.io/${{ github.repository }}/product-service:${{ steps.meta.outputs.TAG }}|g" $TARGET_FILE
+        else
+          echo "Warning: $TARGET_FILE not found. Please verify the exact path inside your manifest repository."
+          exit 1
+        fi
+
+    - name: Commit and Push Manifest Changes
+      run: |
+        cd manifest-repo
+        git config --global user.name "ShanmugamSubramanyam"
+        git config --global user.email "shanmugam.subramanyam2026@gmail.com"
+        
+        git add .
+        
+        # Only commit and push if the file actually changed
+        if git diff --staged --quiet; then
+          echo "No manifest changes detected."
+        else
+          git commit -m "chore: update product-service image to 1.0.${{ github.run_number }} [skip ci]"
+          git push origin main
+        fi
